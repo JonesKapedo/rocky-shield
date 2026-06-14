@@ -1,0 +1,252 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ROCKY SHIELD — Tasker Bridge
+# Tasker calls this script with a command argument
+# Usage: shield-tasker <command> [args]
+#
+# Tasker setup:
+#   Action: Plugin → Termux:Tasker
+#   Executable: ~/.rocky-shield/tasker/shield-tasker
+#   Arguments: <command>
+#
+# Available commands:
+#   scan          — Run full security scan
+#   scan-quick    — Quick scan (processes + network only)
+#   monitor-start — Start real-time monitor
+#   monitor-stop  — Stop real-time monitor
+#   monitor-status— Check if monitor is running
+#   autokill-on   — Enable auto-kill
+#   autokill-off  — Disable auto-kill
+#   autokill-status — Check auto-kill status
+#   status        — Overall shield status
+#   alerts        — Show recent alerts
+#   kills         — Show recent kills
+#   quarantine    — List quarantined files
+#   restore <file>— Restore a quarantined file
+#   update        — Pull latest from GitHub and reinstall
+#   lockdown     — Emergency: kill all non-essential, enable autokill, scan
+
+SHIELD_DIR="$HOME/.rocky-shield"
+LOG_FILE="$SHIELD_DIR/logs/tasker.log"
+ALERT_LOG="$SHIELD_DIR/logs/alerts.log"
+KILL_LOG="$LOG_DIR/kills.log"
+
+mkdir -p "$SHIELD_DIR/logs" "$SHIELD_DIR/tasker"
+
+log() { echo "[$(date '+%H:%M:%S')] TASKER: $1" >> "$LOG_FILE"; }
+
+notify() {
+  if command -v termux-notification &>/dev/null; then
+    termux-notification --title "🛡️ Rocky Shield" --content "$1" --priority "${2:-default}" --id shield-tasker
+  fi
+}
+
+case "${1:-status}" in
+  scan)
+    log "Full scan requested via Tasker"
+    notify "Running full security scan..." high
+    "$SHIELD_DIR/rockyshield.sh" full > "$SHIELD_DIR/logs/last_scan.txt" 2>&1
+    alerts=$(grep -c '\[ALERT\]' "$SHIELD_DIR/logs/last_scan.txt" 2>/dev/null || echo 0)
+    if [ "$alerts" -gt 0 ]; then
+      notify "⚠️ $alerts alert(s) found! Check logs." high
+    else
+      notify "✓ Scan complete. System clean." default
+    fi
+    ;;
+
+  scan-quick)
+    log "Quick scan requested via Tasker"
+    "$SHIELD_DIR/rockyshield.sh" proc > /dev/null 2>&1
+    "$SHIELD_DIR/rockyshield.sh" net > /dev/null 2>&1
+    notify "Quick scan done" default
+    ;;
+
+  monitor-start)
+    if [ -f "$SHIELD_DIR/monitor.pid" ] && kill -0 "$(cat "$SHIELD_DIR/monitor.pid")" 2>/dev/null; then
+      notify "Monitor already running (PID: $(cat "$SHIELD_DIR/monitor.pid"))" default
+    else
+      nohup "$SHIELD_DIR/monitor.sh" > /dev/null 2>&1 &
+      sleep 1
+      if [ -f "$SHIELD_DIR/monitor.pid" ] && kill -0 "$(cat "$SHIELD_DIR/monitor.pid")" 2>/dev/null; then
+        notify "Monitor started (PID: $(cat "$SHIELD_DIR/monitor.pid"))" default
+        log "Monitor started via Tasker (PID: $(cat "$SHIELD_DIR/monitor.pid"))"
+      else
+        notify "Failed to start monitor!" high
+      fi
+    fi
+    ;;
+
+  monitor-stop)
+    if [ -f "$SHIELD_DIR/monitor.pid" ]; then
+      pid=$(cat "$SHIELD_DIR/monitor.pid")
+      kill "$pid" 2>/dev/null
+      rm -f "$SHIELD_DIR/monitor.pid"
+      notify "Monitor stopped (PID: $pid)" default
+      log "Monitor stopped via Tasker"
+    else
+      notify "Monitor not running" default
+    fi
+    ;;
+
+  monitor-status)
+    if [ -f "$SHIELD_DIR/monitor.pid" ] && kill -0 "$(cat "$SHIELD_DIR/monitor.pid")" 2>/dev/null; then
+      echo "RUNNING (PID: $(cat "$SHIELD_DIR/monitor.pid"))"
+    else
+      echo "STOPPED"
+    fi
+    ;;
+
+  autokill-on)
+    touch "$SHIELD_DIR/autokill.enabled"
+    notify "🔴 AUTO-KILL ENABLED" high
+    log "Auto-kill enabled via Tasker"
+    ;;
+
+  autokill-off)
+    rm -f "$SHIELD_DIR/autokill.enabled"
+    notify "🟡 Auto-kill disabled" default
+    log "Auto-kill disabled via Tasker"
+    ;;
+
+  autokill-status)
+    if [ -f "$SHIELD_DIR/autokill.enabled" ]; then
+      echo "ON"
+    else
+      echo "OFF"
+    fi
+    ;;
+
+  status)
+    echo "=== ROCKY SHIELD STATUS ==="
+    echo ""
+    # Monitor
+    if [ -f "$SHIELD_DIR/monitor.pid" ] && kill -0 "$(cat "$SHIELD_DIR/monitor.pid")" 2>/dev/null; then
+      echo "Monitor:  RUNNING (PID: $(cat "$SHIELD_DIR/monitor.pid"))"
+    else
+      echo "Monitor:  STOPPED"
+    fi
+    # Auto-kill
+    if [ -f "$SHIELD_DIR/autokill.enabled" ]; then
+      echo "Auto-kill: ON 🔴"
+    else
+      echo "Auto-kill: OFF"
+    fi
+    # Recent alerts
+    alerts=$(wc -l < "$ALERT_LOG" 2>/dev/null || echo 0)
+    echo "Total alerts: $alerts"
+    # Recent kills
+    kills=$(wc -l < "$KILL_LOG" 2>/dev/null || echo 0)
+    echo "Total kills/quarantines: $kills"
+    # Quarantined files
+    qcount=$(find "$SHIELD_DIR/quarantine" -type f 2>/dev/null | wc -l)
+    echo "Quarantined files: $qcount"
+    # Last scan
+    last_scan=$(ls -t "$SHIELD_DIR/logs"/scan_*.log 2>/dev/null | head -1)
+    if [ -n "$last_scan" ]; then
+      echo "Last scan: $(basename "$last_scan")"
+    else
+      echo "Last scan: Never"
+    fi
+    ;;
+
+  alerts)
+    if [ -f "$ALERT_LOG" ]; then
+      tail -20 "$ALERT_LOG"
+    else
+      echo "No alerts yet"
+    fi
+    ;;
+
+  kills)
+    if [ -f "$KILL_LOG" ]; then
+      tail -20 "$KILL_LOG"
+    else
+      echo "No kills yet"
+    fi
+    ;;
+
+  quarantine)
+    if [ -d "$SHIELD_DIR/quarantine" ]; then
+      ls -la "$SHIELD_DIR/quarantine/"
+    else
+      echo "No quarantined files"
+    fi
+    ;;
+
+  restore)
+    if [ -z "$2" ]; then
+      echo "Usage: shield-tasker restore <filename>"
+      echo "Available files:"
+      ls "$SHIELD_DIR/quarantine/" 2>/dev/null
+    else
+      src="$SHIELD_DIR/quarantine/$2"
+      if [ -f "$src" ]; then
+        chmod 644 "$src" 2>/dev/null
+        mv "$src" "$HOME/$2" 2>/dev/null && notify "Restored: $2" default || notify "Restore failed!" high
+      else
+        echo "File not found in quarantine: $2"
+      fi
+    fi
+    ;;
+
+  update)
+    log "Update requested via Tasker"
+    notify "Updating Rocky Shield..." default
+    cd "$SHIELD_DIR" && git pull 2>&1
+    if [ $? -eq 0 ]; then
+      notify "✓ Update complete" default
+    else
+      notify "Update failed — check connection" high
+    fi
+    ;;
+
+  lockdown)
+    log "EMERGENCY LOCKDOWN via Tasker"
+    notify "🔴 EMERGENCY LOCKDOWN ACTIVATED" high
+    # Enable auto-kill
+    touch "$SHIELD_DIR/autokill.enabled"
+    # Start monitor if not running
+    if ! kill -0 "$(cat "$SHIELD_DIR/monitor.pid" 2>/dev/null)" 2>/dev/null; then
+      nohup "$SHIELD_DIR/monitor.sh" > /dev/null 2>&1 &
+    fi
+    # Kill all non-essential network tools
+    for bad in nc ncat netcat nmap hydra aircrack-ng ettercap tcpdump john hashcat sqlmap; do
+      pkill -9 "$bad" 2>/dev/null
+    done
+    # Run full scan
+    "$SHIELD_DIR/rockyshield.sh" full > "$SHIELD_DIR/logs/lockdown_scan.txt" 2>&1
+    # Clear crontab
+    crontab -r 2>/dev/null
+    # Remove suspicious boot scripts
+    for f in "$HOME/.termux/boot/"*; do
+      [ -f "$f" ] || continue
+      if ! grep -q "rockyshield" "$f" 2>/dev/null; then
+        qf="$SHIELD_DIR/quarantine/$(basename "$f").$(date +%s)"
+        cp "$f" "$qf" 2>/dev/null; chmod 000 "$qf" 2>/dev/null; rm -f "$f" 2>/dev/null
+        log "LOCKDOWN: Quarantined boot script: $f"
+      fi
+    done
+    notify "Lockdown complete. System secured." high
+    ;;
+
+  *)
+    echo "Rocky Shield Tasker Bridge"
+    echo "Usage: shield-tasker <command>"
+    echo ""
+    echo "Commands:"
+    echo "  scan            Full security scan"
+    echo "  scan-quick      Quick scan (proc + net)"
+    echo "  monitor-start   Start real-time monitor"
+    echo "  monitor-stop    Stop real-time monitor"
+    echo "  monitor-status  Check monitor status"
+    echo "  autokill-on     Enable auto-kill"
+    echo "  autokill-off    Disable auto-kill"
+    echo "  autokill-status Check auto-kill status"
+    echo "  status          Overall shield status"
+    echo "  alerts          Show recent alerts"
+    echo "  kills           Show recent kills"
+    echo "  quarantine      List quarantined files"
+    echo "  restore <file>  Restore quarantined file"
+    echo "  update          Pull latest from GitHub"
+    echo "  lockdown        EMERGENCY: full lockdown"
+    ;;
+esac

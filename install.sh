@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# ROCKY SHIELD — Installer
-# Run this ONCE in Termux to set up the full security system
+# ROCKY SHIELD v2.0 — Installer
+# Run this ONCE in Termux
 
 set -e
 
@@ -18,102 +18,95 @@ echo "  ██████╔╝██║   ██║██║     ████�
 echo "  ██╔══██╗██║   ██║██║     ██╔═██╗   ╚██╔╝  "
 echo "  ██║  ██║╚██████╔╝╚██████╗██║  ██╗   ██║   "
 echo "  ╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝   "
-echo -e "  ${CYAN}SHIELD v1.0 — Installer${NC}${NC}"
+echo -e "  ${CYAN}SHIELD v2.0 — Installer${NC}${NC}"
 echo ""
 
 SHIELD_DIR="$HOME/.rocky-shield"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ─── Step 1: Dependencies ───
-echo -e "${CYAN}[1/5] Installing dependencies...${NC}"
+echo -e "${CYAN}[1/6] Installing dependencies...${NC}"
 pkg update -y 2>/dev/null
 pkg install -y coreutils procps iproute2 openssl-tool 2>/dev/null
-ok() { echo -e "${GREEN}  ✓ $1${NC}"; }
-ok "Dependencies ready"
+echo -e "${GREEN}  ✓ Dependencies ready${NC}"
 
-# ─── Step 2: Create directories ───
-echo -e "${CYAN}[2/5] Setting up directories...${NC}"
-mkdir -p "$SHIELD_DIR"/{logs,baseline}
-ok "Directories created at $SHIELD_DIR"
+echo -e "${CYAN}[2/6] Setting up directories...${NC}"
+mkdir -p "$SHIELD_DIR"/{logs,baseline,quarantine,tasker}
+echo -e "${GREEN}  ✓ Directories created${NC}"
 
-# ─── Step 3: Install scripts ───
-echo -e "${CYAN}[3/5] Installing security scripts...${NC}"
+echo -e "${CYAN}[3/6] Installing scripts...${NC}"
+[ -f "$SCRIPT_DIR/rockyshield.sh" ] && cp "$SCRIPT_DIR/rockyshield.sh" "$SHIELD_DIR/rockyshield.sh"
+[ -f "$SCRIPT_DIR/monitor.sh" ] && cp "$SCRIPT_DIR/monitor.sh" "$SHIELD_DIR/monitor.sh"
+[ -f "$SCRIPT_DIR/tasker/shield-tasker" ] && cp "$SCRIPT_DIR/tasker/shield-tasker" "$SHIELD_DIR/tasker/shield-tasker"
+chmod +x "$SHIELD_DIR/rockyshield.sh" "$SHIELD_DIR/monitor.sh" "$SHIELD_DIR/tasker/shield-tasker"
+echo -e "${GREEN}  ✓ Scripts installed${NC}"
 
-# Main scanner
-if [ -f "$SCRIPT_DIR/rockyshield.sh" ]; then
-  cp "$SCRIPT_DIR/rockyshield.sh" "$SHIELD_DIR/rockyshield.sh"
-else
-  echo -e "${YELLOW}  rockyshield.sh not found in $SCRIPT_DIR — copy it manually${NC}"
-fi
-chmod +x "$SHIELD_DIR/rockyshield.sh" 2>/dev/null
-
-# Real-time monitor
-if [ -f "$SCRIPT_DIR/monitor.sh" ]; then
-  cp "$SCRIPT_DIR/monitor.sh" "$SHIELD_DIR/monitor.sh"
-else
-  echo -e "${YELLOW}  monitor.sh not found in $SCRIPT_DIR — copy it manually${NC}"
-fi
-chmod +x "$SHIELD_DIR/monitor.sh" 2>/dev/null
-
-# Create convenient aliases
-echo '# Rocky Shield aliases' >> "$HOME/.bashrc"
-echo 'alias shield="$HOME/.rocky-shield/rockyshield.sh"' >> "$HOME/.bashrc"
-echo 'alias shield-monitor="$HOME/.rocky-shield/monitor.sh"' >> "$HOME/.bashrc"
-echo 'alias shield-stop="kill $(cat $HOME/.rocky-shield/monitor.pid 2>/dev/null) 2>/dev/null; echo Monitor stopped"' >> "$HOME/.bashrc"
-echo 'alias shield-logs="tail -50 $HOME/.rocky-shield/logs/alerts.log"' >> "$HOME/.bashrc"
-ok "Scripts installed, aliases added to .bashrc"
-
-# ─── Step 4: Setup Termux:Boot ───
-echo -e "${CYAN}[4/5] Setting up Termux:Boot auto-start...${NC}"
+echo -e "${CYAN}[4/6] Setting up Termux:Boot...${NC}"
 BOOT_DIR="$HOME/.termux/boot"
 mkdir -p "$BOOT_DIR"
-
-if [ -f "$SCRIPT_DIR/boot/rockyshield-boot" ]; then
-  cp "$SCRIPT_DIR/boot/rockyshield-boot" "$BOOT_DIR/rockyshield"
-else
-  # Create inline
-  cat > "$BOOT_DIR/rockyshield" << 'BOOTEOF'
-#!/data/data/com.termux/files/usr/bin/bash
-sleep 15
-$HOME/.rocky-shield/rockyshield.sh full >> $HOME/.rocky-shield/logs/boot_scan.log 2>&1
-BOOTEOF
-fi
+[ -f "$SCRIPT_DIR/boot/rockyshield-boot" ] && cp "$SCRIPT_DIR/boot/rockyshield-boot" "$BOOT_DIR/rockyshield"
 chmod +x "$BOOT_DIR/rockyshield"
-ok "Boot script installed"
-echo -e "  ${YELLOW}⚠ Make sure Termux:Boot app is installed from F-Droid!${NC}"
-echo -e "  ${YELLOW}  Install it, then open it once to enable boot receiver.${NC}"
+echo -e "${GREEN}  ✓ Boot script installed${NC}"
+echo -e "  ${YELLOW}⚠ Install Termux:Boot from F-Droid and open it once!${NC}"
 
-# ─── Step 5: Run initial baseline scan ───
-echo -e "${CYAN}[5/5] Running initial baseline scan...${NC}"
-echo -e "  ${YELLOW}This creates your security baseline (takes 30-60s)...${NC}"
+echo -e "${CYAN}[5/6] Setting up Termux:Widget shortcut...${NC}"
+WIDGET_DIR="$HOME/.shortcuts"
+mkdir -p "$WIDGET_DIR"
+[ -f "$SCRIPT_DIR/widget/rockyshield-scan" ] && cp "$SCRIPT_DIR/widget/rockyshield-scan" "$WIDGET_DIR/rockyshield-scan"
+chmod +x "$WIDGET_DIR/rockyshield-scan" 2>/dev/null
+echo -e "${GREEN}  ✓ Widget shortcut installed${NC}"
+
+echo -e "${CYAN}[6/6] Running initial baseline scan...${NC}"
 "$SHIELD_DIR/rockyshield.sh" full 2>/dev/null || true
-ok "Baseline scan complete"
+echo -e "${GREEN}  ✓ Baseline created${NC}"
 
-# ─── Done ───
+# Add aliases
+grep -q 'alias shield=' "$HOME/.bashrc" 2>/dev/null || {
+  echo '' >> "$HOME/.bashrc"
+  echo '# Rocky Shield' >> "$HOME/.bashrc"
+  echo 'alias shield="$HOME/.rocky-shield/rockyshield.sh"' >> "$HOME/.bashrc"
+  echo 'alias shield-mon="$HOME/.rocky-shield/monitor.sh"' >> "$HOME/.bashrc"
+  echo 'alias shield-task="$HOME/.rocky-shield/tasker/shield-tasker"' >> "$HOME/.bashrc"
+  echo 'alias shield-stop="kill $(cat $HOME/.rocky-shield/monitor.pid 2>/dev/null) 2>/dev/null; rm -f $HOME/.rocky-shield/monitor.pid; echo Monitor stopped"' >> "$HOME/.bashrc"
+  echo 'alias shield-logs="tail -50 $HOME/.rocky-shield/logs/alerts.log"' >> "$HOME/.bashrc"
+  echo 'alias shield-kills="tail -50 $HOME/.rocky-shield/logs/kills.log"' >> "$HOME/.bashrc"
+}
+
 echo ""
 echo -e "${GREEN}${BOLD}══════════════════════════════════════${NC}"
-echo -e "${GREEN}${BOLD}  ROCKY SHIELD INSTALLED ✓${NC}"
+echo -e "${GREEN}${BOLD}  ROCKY SHIELD v2.0 INSTALLED ✓${NC}"
 echo -e "${GREEN}${BOLD}══════════════════════════════════════${NC}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
-echo -e "    shield              — Full security scan"
-echo -e "    shield pkg          — Package audit only"
-echo -e "    shield net          — Network monitor only"
-echo -e "    shield proc         — Process audit only"
-echo -e "    shield persist      — Startup/persistence check"
-echo -e "    shield integrity    — File integrity check"
-echo -e "    shield perms        — Permission audit"
-echo -e "    shield scripts      — Python/Node package audit"
-echo -e "    shield-monitor      — Start real-time monitor (background)"
-echo -e "    shield-stop         — Stop real-time monitor"
-echo -e "    shield-logs         — View recent alerts"
+echo -e "    shield              Full security scan"
+echo -e "    shield pkg          Package audit"
+echo -e "    shield net          Network monitor"
+echo -e "    shield proc         Process audit"
+echo -e "    shield persist      Persistence check"
+echo -e "    shield integrity    File integrity"
+echo -e "    shield perms        Permission audit"
+echo -e "    shield scripts      Python/Node audit"
+echo -e "    shield files        Suspicious file scan"
+echo -e "    shield autokill on  Enable auto-kill"
+echo -e "    shield autokill off Disable auto-kill"
 echo ""
-echo -e "  ${BOLD}Auto-start:${NC}"
-echo -e "    Scans run automatically on Termux boot (via Termux:Boot)"
-echo -e "    For real-time monitoring, run: ${CYAN}shield-monitor &${NC}"
+echo -e "  ${BOLD}Monitor:${NC}"
+echo -e "    shield-mon &        Start real-time monitor"
+echo -e "    shield-stop         Stop real-time monitor"
 echo ""
-echo -e "  ${BOLD}Logs:${NC} $SHIELD_DIR/logs/"
-echo -e "  ${BOLD}Baseline:${NC} $SHIELD_DIR/baseline/"
+echo -e "  ${BOLD}Tasker:${NC}"
+echo -e "    shield-task scan    Scan via Tasker"
+echo -e "    shield-task lockdown  Emergency lockdown"
+echo -e "    shield-task status  Shield status"
 echo ""
-echo -e "  ${YELLOW}Tip: Run 'shield-monitor &' to start real-time protection.${NC}"
-echo -e "  ${YELLOW}Tip: Re-run 'shield' after installing any new package.${NC}"
+echo -e "  ${BOLD}Logs:${NC}"
+echo -e "    shield-logs         View alerts"
+echo -e "    shield-kills        View kills/quarantines"
+echo ""
+echo -e "  ${YELLOW}Next steps:${NC}"
+echo -e "  1. Install Termux:Boot from F-Droid → open it"
+echo -e "  2. Install Termux:Widget from F-Droid"
+echo -e "  3. Run: ${CYAN}shield autokill on${NC}"
+echo -e "  4. Run: ${CYAN}shield-mon &${NC}"
+echo -e "  5. Add Tasker profile → see GitHub README"
+echo ""
+echo -e "  Repo: https://github.com/JonesKapedo/rocky-shield"

@@ -1,120 +1,139 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# ROCKY SHIELD — Real-Time Monitor Daemon
-# Watches for: new installs, file changes, new network connections, suspicious processes
-# Runs in background, logs to ~/.rocky-shield/logs/realtime.log
+# ROCKY SHIELD — Real-Time Monitor Daemon v2.0
+# Watches for suspicious activity every 30 seconds and AUTO-KILLS threats
 
 SHIELD_DIR="$HOME/.rocky-shield"
 LOG_FILE="$SHIELD_DIR/logs/realtime.log"
+KILL_LOG="$SHIELD_DIR/logs/kills.log"
 PID_FILE="$SHIELD_DIR/monitor.pid"
-CHECK_INTERVAL=30  # seconds between checks
-
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+AUTO_KILL_FILE="$SHIELD_DIR/autokill.enabled"
+CHECK_INTERVAL=30
 
 mkdir -p "$SHIELD_DIR/logs"
 
-log() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"; }
-alert() { echo -e "${RED}[ALERT]${NC} $1" | tee -a "$LOG_FILE"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"; }
+AUTO_KILL=false
+[ -f "$AUTO_KILL_FILE" ] && AUTO_KILL=true
 
-# Save PID
 echo $$ > "$PID_FILE"
 
 # Initial snapshots
-SNAP_PACKAGES="/tmp/shield_snap_pkgs"
-SNAP_PROCS="/tmp/shield_snap_procs"
-SNAP_LISTEN="/tmp/shield_snap_listen"
+dpkg -l 2>/dev/null | grep '^ii' | awk '{print $2}' | sort > /tmp/shield_rt_pkgs
+ps -eo pid,comm,args --no-headers 2>/dev/null > /tmp/shield_rt_procs
+ss -tlnp 2>/dev/null | awk '{print $4}' | sort > /tmp/shield_rt_listen 2>/dev/null || touch /tmp/shield_rt_listen
 
-dpkg -l 2>/dev/null | grep '^ii' | awk '{print $2}' | sort > "$SNAP_PACKAGES"
-ps -eo comm --no-headers 2>/dev/null | sort > "$SNAP_PROCS"
-ss -tlnp 2>/dev/null | awk '{print $4}' | sort > "$SNAP_LISTEN" 2>/dev/null || touch "$SNAP_LISTEN"
+log() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"; }
+kill_it() {
+  local pid="$1" name="$2" reason="$3"
+  [ -z "$pid" ] && return
+  [ "$pid" = "$$" ] && return
+  [ "$pid" = "1" ] && return
+  [ "$pid" = "$(cat "$PID_FILE" 2>/dev/null)" ] && return
 
-log "Monitor started (PID: $$, interval: ${CHECK_INTERVAL}s)"
+  if [ "$AUTO_KILL" = true ]; then
+    kill -TERM "$pid" 2>/dev/null
+    sleep 1
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null && log "FORCE KILLED PID $pid ($name) — $reason"
+    kill -0 "$pid" 2>/dev/null || log "KILLED PID $pid ($name) — $reason"
+    echo "[$(date '+%H:%M:%S')] KILLED PID $pid ($name) — $reason" >> "$KILL_LOG"
 
-# ─── MONITOR LOOP ───
+    command -v termux-notification &>/dev/null && \
+      termux-notification --title "🛡️ Shield Killed Process" \
+        --content "Killed: $name (PID $pid) — $reason" \
+        --priority high --id shield-kill
+  else
+    log "WOULD KILL PID $pid ($name) — $reason (auto-kill off)"
+  fi
+}
+
+log "Monitor started (PID: $$, interval: ${CHECK_INTERVAL}s, auto-kill: $AUTO_KILL)"
+
 while true; do
   sleep "$CHECK_INTERVAL"
 
-  # 1. Check for new/removed packages
+  # Reload auto-kill setting
+  AUTO_KILL=false
+  [ -f "$AUTO_KILL_FILE" ] && AUTO_KILL=true
+
+  # ── 1. New packages ──
   dpkg -l 2>/dev/null | grep '^ii' | awk '{print $2}' | sort > /tmp/shield_new_pkgs
-  new=$(comm -23 /tmp/shield_new_pkgs "$SNAP_PACKAGES")
-  removed=$(comm -13 /tmp/shield_new_pkgs "$SNAP_PACKAGES")
+  new=$(comm -23 /tmp/shield_new_pkgs /tmp/shield_rt_pkgs)
   if [ -n "$new" ]; then
     echo "$new" | while read -r p; do
-      alert "PACKAGE INSTALLED: $p"
-      # Auto-scan the new package
-      dpkg -L "$p" 2>/dev/null | grep -E '(/bin/|/lib.*\.so)' | head -10 | while read -r f; do
-        warn "  → Installed file: $f"
-      done
-    done
-  fi
-  if [ -n "$removed" ]; then
-    echo "$removed" | while read -r p; do
-      warn "PACKAGE REMOVED: $p"
-    done
-  fi
-  mv /tmp/shield_new_pkgs "$SNAP_PACKAGES"
-
-  # 2. Check for new processes
-  ps -eo comm --no-headers 2>/dev/null | sort > /tmp/shield_new_procs
-  new_proc=$(comm -23 /tmp/shield_new_procs "$SNAP_PROCS")
-  if [ -n "$new_proc" ]; then
-    echo "$new_proc" | while read -r p; do
-      # Filter out common noise
-      if ! echo "$p" | grep -qE '^(ps|grep|awk|sort|comm|sleep|bash|sh)$'; then
-        warn "NEW PROCESS: $p"
-        # Check if it's suspicious
-        if echo "$p" | grep -qiE '(nc|ncat|nmap|hydra|aircrack|ettercap|tcpdump|john|hashcat|sqlmap|msf|beef|cobalt|metasploit)'; then
-          alert "SUSPICIOUS PROCESS DETECTED: $p"
+      log "NEW PACKAGE: $p"
+      if echo "$p" | grep -qiE '(hack|exploit|crack|keylogger|backdoor|rootkit|trojan|reverse|payload)'; then
+        log "DANGEROUS PACKAGE: $p"
+        if [ "$AUTO_KILL" = true ]; then
+          dpkg --purge "$p" 2>/dev/null && log "REMOVED: $p"
         fi
+        command -v termux-notification &>/dev/null && \
+          termux-notification --title "🛡️ Dangerous Package!" \
+            --content "Detected: $p" --priority high --id shield-pkg
       fi
     done
   fi
-  mv /tmp/shield_new_procs "$SNAP_PROCS"
+  mv /tmp/shield_new_pkgs /tmp/shield_rt_pkgs
 
-  # 3. Check for new listening ports
+  # ── 2. Suspicious processes ──
+  local SUSPICIOUS='nc$|ncat$|netcat$|nmap$|hydra$|aircrack|ettercap$|tcpdump$|john$|hashcat$|sqlmap$|msfconsole$|msfvenom$|xmrig|minerd$|stratum$|cpuminer$|slowloris$|hping3$|arpspoof$|dsniff$|reaver$|wifite$'
+  ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE "$SUSPICIOUS" | while read -r pid comm args; do
+    kill_it "$pid" "$comm" "Malicious tool: $comm"
+  done
+
+  # Reverse shells
+  ps -eo pid,comm,args --no-headers 2>/dev/null | \
+    grep -iE '(/dev/tcp|/dev/udp|bash -i|sh -i|python.*-c.*socket.*subprocess|perl.*-c.*socket|nc -e|ncat -e)' | \
+    while read -r pid comm args; do
+      kill_it "$pid" "$comm" "Reverse shell: $args"
+    done
+
+  # Crypto miners
+  ps -eo pid,comm,args --no-headers 2>/dev/null | \
+    grep -iE '(xmrig|minerd|stratum|cpuminer|ccminer|ethminer|nicehash)' | \
+    while read -r pid comm args; do
+      kill_it "$pid" "$comm" "Crypto miner: $comm"
+    done
+
+  # ── 3. New listeners ──
   ss -tlnp 2>/dev/null | awk '{print $4}' | sort > /tmp/shield_new_listen 2>/dev/null || touch /tmp/shield_new_listen
-  new_port=$(comm -23 /tmp/shield_new_listen "$SNAP_LISTEN")
-  if [ -n "$new_port" ]; then
-    echo "$new_port" | while read -r port; do
-      if [ -n "$port" ]; then
-        if echo "$port" | grep -qvE '127\.0\.0\.1|::1'; then
-          alert "NEW EXTERNAL LISTENER: $port"
-        else
-          warn "New localhost listener: $port"
-        fi
-      fi
-    done
-  fi
-  mv /tmp/shield_new_listen "$SNAP_LISTEN"
+  comm -23 /tmp/shield_new_listen /tmp/shield_rt_listen | while read -r port; do
+    [ -z "$port" ] && continue
+    if echo "$port" | grep -qvE '127\.0\.0\.1|::1'; then
+      log "NEW EXTERNAL LISTENER: $port"
+      pid=$(ss -tlnp 2>/dev/null | grep "$port" | grep -oP 'pid=\K[0-9]+' | head -1)
+      [ -n "$pid" ] && kill_it "$pid" "listener-$port" "New external listener on $port"
+    fi
+  done
+  mv /tmp/shield_new_listen /tmp/shield_rt_listen
 
-  # 4. Check for new outbound connections (possible C2)
-  if command -v ss &>/dev/null; then
-    ss -tnp 2>/dev/null | grep ESTAB | grep -vE '127\.0\.0\.1|::1|:(22|80|443|8080|8443) ' | tail -5 | while read -r line; do
-      # Only alert on truly unusual connections
-      if echo "$line" | grep -qvE ':(53|123|443|80|853|8443) '; then
-        warn "Unusual outbound: $line"
-      fi
+  # ── 4. Suspicious outbound (C2 ports) ──
+  ss -tnp 2>/dev/null | grep ESTAB | grep -E ':(4444|5555|6666|7777|8888|9999|1337|31337|12345|54321) ' | \
+    while read -r line; do
+      log "SUSPICIOUS OUTBOUND: $line"
+      pid=$(echo "$line" | grep -oP 'pid=\K[0-9]+' | head -1)
+      [ -n "$pid" ] && kill_it "$pid" "c2-connection" "C2 port connection"
     done
-  fi
 
-  # 5. Check for modified boot scripts (persistence injection)
+  # ── 5. Boot script tampering ──
   BOOT_DIR="$HOME/.termux/boot"
-  if [ -d "$BOOT_DIR" ]; then
-    find "$BOOT_DIR" -newer "$PID_FILE" -type f 2>/dev/null | while read -r f; do
-      alert "BOOT SCRIPT MODIFIED: $f"
-    done
-  fi
+  [ -d "$BOOT_DIR" ] && find "$BOOT_DIR" -newer "$PID_FILE" -type f 2>/dev/null | while read -r f; do
+    log "BOOT SCRIPT MODIFIED: $f"
+    if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e)' "$f" 2>/dev/null; then
+      log "MALICIOUS BOOT SCRIPT: $f"
+      qf="$SHIELD_DIR/quarantine/$(basename "$f").$(date +%s)"
+      cp "$f" "$qf" 2>/dev/null; chmod 000 "$qf" 2>/dev/null; rm -f "$f" 2>/dev/null
+      log "QUARANTINED: $f → $qf"
+    fi
+  done
 
-  # 6. Check shell profiles for tampering
+  # ── 6. Shell profile tampering ──
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$rc" ] && [ "$rc" -nt "$PID_FILE" ]; then
-      warn "Shell profile modified: $rc"
+      log "PROFILE MODIFIED: $rc"
       if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|reverse)' "$rc" 2>/dev/null; then
-        alert "MALICIOUS CODE in $rc — CHECK IMMEDIATELY"
+        log "MALICIOUS PROFILE: $rc"
+        qf="$SHIELD_DIR/quarantine/$(basename "$rc").$(date +%s)"
+        cp "$rc" "$qf" 2>/dev/null; chmod 000 "$qf" 2>/dev/null; rm -f "$rc" 2>/dev/null
+        log "QUARANTINED: $rc → $qf"
       fi
     fi
   done
