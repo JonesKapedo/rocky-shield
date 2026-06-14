@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Widget shortcut — Tap to run shield scan
+# Place in ~/.shortcuts/ for Termux:Widget app
+$HOME/.rocky-shield/rockyshield.sh full

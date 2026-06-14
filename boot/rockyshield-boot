@@ -1,0 +1,28 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Boot startup script for Rocky Shield
+# Place this at ~/.termux/boot/rockyshield
+# Termux:Boot automatically runs everything in this directory on startup
+
+# Wait for Termux to fully initialize
+sleep 15
+
+# Run security scan
+$HOME/.rocky-shield/rockyshield.sh full >> $HOME/.rocky-shield/logs/boot_scan.log 2>&1
+
+# Optional: show notification if Termux:Notification is available
+if command -v termux-notification &>/dev/null; then
+  ALERTS=$(grep -c '\[ALERT\]' $HOME/.rocky-shield/logs/boot_scan.log 2>/dev/null || echo 0)
+  if [ "$ALERTS" -gt 0 ]; then
+    termux-notification \
+      --title "🛡️ Rocky Shield Alert" \
+      --content "$ALERTS security alert(s) detected on boot. Check logs." \
+      --priority high \
+      --id rockyshield
+  else
+    termux-notification \
+      --title "🛡️ Rocky Shield" \
+      --content "System scan complete. All clear." \
+      --priority default \
+      --id rockyshield
+  fi
+fi
