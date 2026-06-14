@@ -56,7 +56,8 @@ bash install.sh
 | `shield autokill on` | Enable auto-kill mode |
 | `shield autokill off` | Disable auto-kill mode |
 | `shield-mon &` | Start real-time monitor |
-| `shield-stop` | Stop monitor |
+| `shield-stop` | Stop monitor + watchdog |
+| `shield-status` | Check monitor/watchdog status |
 | `shield-logs` | View recent alerts |
 | `shield-kills` | View killed/quarantined |
 
@@ -111,7 +112,25 @@ bash install.sh
 The Termux:Boot script (`~/.termux/boot/rockyshield`) automatically:
 1. Runs a full security scan
 2. Starts the real-time monitor daemon
-3. Sends a notification with results
+3. Starts a **watchdog** that auto-restarts the monitor if it dies
+4. Sends a notification with results
+
+### Watchdog (Always-On Guarantee)
+
+The watchdog is a parent process that watches the monitor. If Termux kills the monitor (memory pressure, background kills, etc.), the watchdog restarts it within 5 seconds. This ensures Shield stays running **24/7** as long as Termux is alive.
+
+Check both are running:
+```bash
+shield-status
+```
+Output:
+```
+Monitor: RUNNING
+Watchdog: RUNNING
+Auto-kill: ON
+```
+
+Both are stopped by `shield-stop`.
 
 ## Architecture
 
@@ -122,6 +141,7 @@ The Termux:Boot script (`~/.termux/boot/rockyshield`) automatically:
 ├── autokill.enabled        # Touch this file to enable auto-kill
 ├── shield.pid              # Scanner PID
 ├── monitor.pid             # Monitor PID
+├── watchdog.pid            # Watchdog PID (auto-restarts monitor)
 ├── tasker/
 │   └── shield-tasker       # Tasker bridge script
 ├── baseline/
@@ -134,6 +154,7 @@ The Termux:Boot script (`~/.termux/boot/rockyshield`) automatically:
     ├── kills.log           # All kills/quarantines
     ├── realtime.log        # Monitor daemon log
     ├── boot_scan.log       # Boot scan results
+    ├── watchdog.log         # Watchdog restart events
     └── scan_*.log          # Individual scan logs
 ```
 
