@@ -1,7 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# ROCKY SHIELD - Termux Security Monitor v2.0
-# Scans + AUTO-KILLS suspicious processes and quarantines malicious files
-# Runs automatically on Termux startup
+# ROCKY SHIELD v3.0 — Termux Security Monitor
+# Single command interface: shield <subcommand>
 
 SHIELD_DIR="$HOME/.rocky-shield"
 LOG_DIR="$SHIELD_DIR/logs"
@@ -11,8 +10,10 @@ ALERT_LOG="$LOG_DIR/alerts.log"
 KILL_LOG="$LOG_DIR/kills.log"
 SCAN_LOG="$LOG_DIR/scan_$(date +%Y%m%d_%H%M%S).log"
 PID_FILE="$SHIELD_DIR/shield.pid"
-CONFIG_FILE="$SHIELD_DIR/config"
+MON_PID_FILE="$SHIELD_DIR/monitor.pid"
+WATCHDOG_PID_FILE="$SHIELD_DIR/watchdog.pid"
 AUTO_KILL_FILE="$SHIELD_DIR/autokill.enabled"
+AUTH_FILE="$SHIELD_DIR/authorized.list"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,38 +23,40 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 mkdir -p "$LOG_DIR" "$BASELINE_DIR" "$QUARANTINE_DIR"
-echo $$ > "$PID_FILE"
+touch "$ALERT_LOG" "$KILL_LOG" "$AUTH_FILE"
 
-# Load config
 AUTO_KILL=false
 [ -f "$AUTO_KILL_FILE" ] && AUTO_KILL=true
 
-log() { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$SCAN_LOG"; }
+log()   { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$SCAN_LOG"; }
 alert() { echo -e "${RED}[ALERT]${NC} $1" | tee -a "$SCAN_LOG" "$ALERT_LOG"; echo; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$SCAN_LOG"; }
-ok() { echo -e "${GREEN}[OK]${NC} $1" | tee -a "$SCAN_LOG"; }
-info() { echo -e "${CYAN}[INFO]${NC} $1" | tee -a "$SCAN_LOG"; }
-header() { echo -e "\n${BOLD}══════════════════════════════════════${NC}\n${BOLD} $1${NC}\n${BOLD}══════════════════════════════════════${NC}" | tee -a "$SCAN_LOG"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$SCAN_LOG"; }
+ok()    { echo -e "${GREEN}[OK]${NC} $1" | tee -a "$SCAN_LOG"; }
+info()  { echo -e "${CYAN}[INFO]${NC} $1" | tee -a "$SCAN_LOG"; }
+header(){ echo -e "\n${BOLD}══════════════════════════════════════\n $1\n══════════════════════════════════════${NC}" | tee -a "$SCAN_LOG"; }
+
+# ─── Check if package/tool is authorized ───
+is_authorized() {
+  grep -qi "^$1$" "$AUTH_FILE" 2>/dev/null
+}
 
 # ─── KILL FUNCTION ───
 kill_suspicious() {
-  local pid="$1"
-  local name="$2"
-  local reason="$3"
+  local pid="$1" name="$2" reason="$3"
+  [ -z "$pid" ] && return
+  [ "$pid" = "$$" ] && return
+  [ "$pid" = "1" ] && return
+  [ "$pid" = "$(cat "$MON_PID_FILE" 2>/dev/null)" ] && return
+  [ "$pid" = "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" ] && return
 
-  if [ -z "$pid" ] || [ "$pid" = "$$" ] || [ "$pid" = "1" ]; then
-    return
-  fi
-
-  # Don't kill ourselves or init
-  if [ "$pid" = "$(cat "$PID_FILE" 2>/dev/null)" ]; then
+  if is_authorized "$name"; then
+    warn "SKIPPED authorized tool: $name (PID $pid)"
     return
   fi
 
   if [ "$AUTO_KILL" = true ]; then
     kill -TERM "$pid" 2>/dev/null
     sleep 1
-    # Force kill if still running
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null
       log "FORCE KILLED PID $pid ($name) — $reason"
@@ -61,382 +64,323 @@ kill_suspicious() {
       log "KILLED PID $pid ($name) — $reason"
     fi
     echo "[$(date '+%H:%M:%S')] KILLED PID $pid ($name) — $reason" >> "$KILL_LOG"
-
-    # Termux notification
-    if command -v termux-notification &>/dev/null; then
-      termux-notification \
-        --title "🛡️ Shield Killed Process" \
-        --content "Killed: $name (PID $pid) — $reason" \
-        --priority high \
-        --id shield-kill
-    fi
+    command -v termux-notification &>/dev/null && \
+      termux-notification --title "🛡️ Shield Killed" \
+        --content "Killed: $name (PID $pid)" --priority high --id shield-kill
   else
-    warn "Would kill PID $pid ($name) — $reason (auto-kill disabled, use: shield autokill on)"
+    warn "Would kill PID $pid ($name) — $reason (auto-kill off)"
   fi
 }
 
 # ─── QUARANTINE FUNCTION ───
 quarantine_file() {
-  local filepath="$1"
-  local reason="$2"
-
-  if [ ! -f "$filepath" ]; then
-    return
-  fi
-
-  local filename
-  filename=$(basename "$filepath")
-  local qfile="$QUARANTINE_DIR/${filename}.$(date +%s)"
-
-  # Copy to quarantine, then remove original
-  cp "$filepath" "$qfile" 2>/dev/null
-  chmod 000 "$qfile" 2>/dev/null
+  local filepath="$1" reason="$2"
+  [ ! -f "$filepath" ] && return
+  local qf="$QUARANTINE_DIR/$(basename "$filepath").$(date +%s)"
+  cp "$filepath" "$qf" 2>/dev/null
+  chmod 000 "$qf" 2>/dev/null
   rm -f "$filepath" 2>/dev/null
-
-  log "QUARANTINED: $filepath → $qfile — $reason"
+  log "QUARANTINED: $filepath → $qf — $reason"
   echo "[$(date '+%H:%M:%S')] QUARANTINED: $filepath — $reason" >> "$KILL_LOG"
-
-  if command -v termux-notification &>/dev/null; then
-    termux-notification \
-      --title "🛡️ Shield Quarantined File" \
-      --content "Quarantined: $filename — $reason" \
-      --priority high \
-      --id shield-quarantine
-  fi
+  command -v termux-notification &>/dev/null && \
+    termux-notification --title "🛡️ Quarantined" \
+      --content "$(basename "$filepath") — $reason" --priority high --id shield-quar
 }
 
-# ─── SCAN 1: Installed Package Audit ───
+# ═══════════════════════════════════════════
+# SCAN FUNCTIONS
+# ═══════════════════════════════════════════
+
 scan_packages() {
   header "PACKAGE AUDIT"
   local pkg_list="$BASELINE_DIR/packages.list"
-
-  dpkg -l 2>/dev/null | grep '^ii' | awk '{print $2, $3}' | sort > /tmp/shield_current_pkgs.txt
+  dpkg -l 2>/dev/null | grep '^ii' | awk '{print $2, $3}' | sort > /tmp/shield_cur_pkgs
 
   if [ -f "$pkg_list" ]; then
-    comm -23 "$pkg_list" /tmp/shield_current_pkgs.txt | while read -r line; do
-      alert "NEW package installed: $line"
-      # Check if the new package is suspicious
-      local pkgname
-      pkgname=$(echo "$line" | awk '{print $1}')
-      if echo "$pkgname" | grep -qiE '(hack|exploit|crack|keylogger|sniff|spoof|backdoor|rootkit|trojan|reverse|shell|payload)'; then
-        alert "DANGEROUS package detected: $pkgname — attempting removal"
-        if [ "$AUTO_KILL" = true ]; then
-          dpkg --purge "$pkgname" 2>/dev/null && ok "Removed: $pkgname" || warn "Could not remove: $pkgname"
+    comm -23 "$pkg_list" /tmp/shield_cur_pkgs | while read -r line; do
+      local pkgname=$(echo "$line" | awk '{print $1}')
+      if is_authorized "$pkgname"; then
+        info "Authorized package installed: $pkgname"
+      else
+        alert "NEW package: $line"
+        if echo "$pkgname" | grep -qiE '(hack|exploit|crack|keylogger|sniff|spoof|backdoor|rootkit|trojan|reverse|payload)'; then
+          alert "DANGEROUS: $pkgname"
+          [ "$AUTO_KILL" = true ] && dpkg --purge "$pkgname" 2>/dev/null && ok "Removed: $pkgname"
         fi
       fi
     done
-    comm -13 "$pkg_list" /tmp/shield_current_pkgs.txt | while read -r line; do
-      warn "Package REMOVED: $line"
-    done
-    cp /tmp/shield_current_pkgs.txt "$pkg_list"
+    comm -13 "$pkg_list" /tmp/shield_cur_pkgs | while read -r line; do warn "Removed: $line"; done
+    cp /tmp/shield_cur_pkgs "$pkg_list"
   else
-    info "Creating initial package baseline ($(wc -l < /tmp/shield_current_pkgs.txt) packages)..."
-    cp /tmp/shield_current_pkgs.txt "$pkg_list"
+    info "Creating package baseline ($(wc -l < /tmp/shield_cur_pkgs) packages)"
+    cp /tmp/shield_cur_pkgs "$pkg_list"
   fi
-
-  # Check for suspicious package names
-  grep -iE '(hack|exploit|crack|keylogger|sniff|spoof|backdoor|rootkit|trojan)' /tmp/shield_current_pkgs.txt | while read -r line; do
-    alert "SUSPICIOUS package name: $line"
+  grep -iE '(hack|exploit|crack|keylogger|sniff|spoof|backdoor|rootkit|trojan)' /tmp/shield_cur_pkgs | while read -r line; do
+    local pn=$(echo "$line" | awk '{print $1}')
+    is_authorized "$pn" || alert "Suspicious package: $line"
   done
 }
 
-# ─── SCAN 2: Network Connection Monitor ───
 scan_network() {
   header "NETWORK MONITOR"
-
   if command -v ss &>/dev/null; then
-    # External listeners
-    ss -tlnp 2>/dev/null | grep -v "127.0.0.1\|::1" | while read -r line; do
-      local port
+    ss -tlnp 2>/dev/null | grep -v "127\.0\.0\.1\|::1" | while read -r line; do
       port=$(echo "$line" | grep -oP ':\K\d+' | tail -1)
-      if [ -n "$port" ]; then
-        alert "External listener on port $port: $line"
-        # Kill process listening on external port
-        local pid
-        pid=$(echo "$line" | grep -oP 'pid=\K[0-9]+' | head -1)
-        if [ -n "$pid" ]; then
-          kill_suspicious "$pid" "port-$port-listener" "External listener on port $port"
-        fi
-      fi
+      [ -z "$port" ] && continue
+      pid=$(echo "$line" | grep -oP 'pid=\K[0-9]+' | head -1)
+      [ -n "$pid" ] && kill_suspicious "$pid" "port-$port" "External listener port $port"
+      alert "External listener port $port"
     done
-
-    # Suspicious outbound connections
-    ss -tnp 2>/dev/null | grep ESTAB | while read -r line; do
-      if echo "$line" | grep -qiE ':(4444|5555|6666|7777|8888|9999|1337|31337|12345|54321) '; then
-        alert "Suspicious outbound connection (known C2 port): $line"
-        local pid
-        pid=$(echo "$line" | grep -oP 'pid=\K[0-9]+' | head -1)
-        [ -n "$pid" ] && kill_suspicious "$pid" "suspicious-outbound" "C2 port connection"
-      fi
+    ss -tnp 2>/dev/null | grep ESTAB | grep -E ':(4444|5555|6666|7777|8888|9999|1337|31337|12345|54321) ' | while read -r line; do
+      alert "Suspicious outbound (C2 port): $line"
+      pid=$(echo "$line" | grep -oP 'pid=\K[0-9]+' | head -1)
+      [ -n "$pid" ] && kill_suspicious "$pid" "c2-conn" "C2 connection"
     done
   fi
-
-  ok "Network scan complete"
+  ok "Network scan done"
 }
 
-# ─── SCAN 3: Running Process Audit + KILL ───
 scan_processes() {
   header "PROCESS AUDIT"
-  local proc_list="$BASELINE_DIR/processes.list"
-
-  ps -eo pid,user,ppid,comm,args --no-headers 2>/dev/null > /tmp/shield_current_procs.txt \
-    || ps aux > /tmp/shield_current_procs.txt
-
-  if [ -f "$proc_list" ]; then
-    local new_procs
-    new_procs=$(comm -23 <(sort /tmp/shield_current_procs.txt) <(sort "$proc_list") | head -20)
-    if [ -n "$new_procs" ]; then
-      warn "New/different processes since baseline:"
-      echo "$new_procs" | while read -r line; do
-        echo "  → $line" | tee -a "$SCAN_LOG"
-      done
-    else
-      ok "No unexpected new processes"
-    fi
-  else
-    info "Creating initial process baseline..."
-    cp /tmp/shield_current_procs.txt "$proc_list"
-  fi
-
-  # ─── KILL suspicious processes ───
-  # Known malicious tool names
-  local SUSPICIOUS='nc$|ncat$|netcat$|nmap$|hydra$|aircrack|ettercap$|tcpdump$|wireshark$|john$|hashcat$|sqlmap$|msfconsole$|msfvenom$|beef$|cobalt$|metasploit$|slowloris$|hping3$|arpspoof$|dsniff$|kismet$|reaver$|wifite$'
-
+  ps -eo pid,comm,args --no-headers 2>/dev/null > /tmp/shield_cur_procs
+  local SUSPICIOUS='nc$|ncat$|netcat$|nmap$|hydra$|aircrack|ettercap$|john$|hashcat$|sqlmap$|msfconsole$|msfvenom$|xmrig|minerd$|stratum$|slowloris$|hping3$|arpspoof$|dsniff$|reaver$|wifite$'
   ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE "$SUSPICIOUS" | while read -r pid comm args; do
-    kill_suspicious "$pid" "$comm" "Known malicious tool: $comm"
+    kill_suspicious "$pid" "$comm" "Malicious tool: $comm"
   done
-
-  # Reverse shell patterns
-  ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE '(/dev/tcp|/dev/udp|bash -i|sh -i|python.*-c.*socket|python.*-c.*subprocess|perl.*-c.*socket|ruby.*-c.*socket|nc -e|ncat -e)' | while read -r pid comm args; do
-    kill_suspicious "$pid" "$comm" "Reverse shell pattern: $args"
-  done
-
-  # Crypto miners
-  ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE '(xmrig|minerd|stratum|cpuminer|ccminer|ethminer|nicehash)' | while read -r pid comm args; do
-    kill_suspicious "$pid" "$comm" "Crypto miner detected: $comm"
-  done
-
-  # Processes running from unusual locations
-  ps -eo pid,comm,args --no-headers 2>/dev/null | while read -r pid comm args; do
-    if echo "$args" | grep -qE '(/tmp/|/dev/shm/|/sdcard/Download/|\.hidden)'; then
-      if ! echo "$comm" | grep -qE '^(bash|sh|zsh|python|node|ruby)$'; then
-        warn "Process running from unusual location: $comm (PID $pid) — $args"
-      fi
-    fi
-  done
-
-  # Zombie processes
-  local zombie_count
-  zombie_count=$(ps aux 2>/dev/null | awk '$8 ~ /Z/' | wc -l)
-  if [ "$zombie_count" -gt 0 ]; then
-    warn "$zombie_count zombie process(es) detected"
-  else
-    ok "No zombie processes"
-  fi
+  ps -eo pid,comm,args --no-headers 2>/dev/null | \
+    grep -iE '(/dev/tcp|/dev/udp|bash -i|sh -i|python.*-c.*socket.*subprocess|perl.*-c.*socket|nc -e|ncat -e)' | \
+    while read -r pid comm args; do
+      kill_suspicious "$pid" "$comm" "Reverse shell: $args"
+    done
+  ps -eo pid,comm,args --no-headers 2>/dev/null | \
+    grep -iE '(xmrig|minerd|stratum|cpuminer|ccminer|ethminer|nicehash)' | \
+    while read -r pid comm args; do
+      kill_suspicious "$pid" "$comm" "Crypto miner: $comm"
+    done
+  local zc=$(ps aux 2>/dev/null | awk '$8 ~ /Z/' | wc -l)
+  [ "$zc" -gt 0 ] && warn "$zc zombie process(es)" || ok "No zombies"
 }
 
-# ─── SCAN 4: Cron/Timer & Startup Persistence Check ───
 scan_persistence() {
-  header "PERSISTENCE CHECK (Startup Items)"
-
-  # Crontab entries
+  header "PERSISTENCE CHECK"
   if command -v crontab &>/dev/null; then
-    local cron_entries
-    cron_entries=$(crontab -l 2>/dev/null)
-    if [ -n "$cron_entries" ] && ! echo "$cron_entries" | grep -q "^no crontab"; then
-      warn "Active crontab entries found:"
-      echo "$cron_entries" | while read -r line; do
+    local ce=$(crontab -l 2>/dev/null)
+    if [ -n "$ce" ] && ! echo "$ce" | grep -q "^no crontab"; then
+      echo "$ce" | while read -r line; do
         echo "  ⏰ $line" | tee -a "$SCAN_LOG"
-        if echo "$line" | grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|reverse|connect.back|nc |ncat )'; then
-          alert "DANGEROUS cron entry: $line"
-          if [ "$AUTO_KILL" = true ]; then
-            crontab -r 2>/dev/null && ok "Crontab cleared" || warn "Could not clear crontab"
-          fi
+        if echo "$line" | grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc |ncat )'; then
+          alert "DANGEROUS cron: $line"
+          [ "$AUTO_KILL" = true ] && crontab -r 2>/dev/null && ok "Crontab cleared"
         fi
       done
     else
-      ok "No crontab entries (clean)"
+      ok "No crontab entries"
     fi
   fi
-
-  # Termux:Boot startup scripts
-  local boot_dir="$HOME/.termux/boot"
-  if [ -d "$boot_dir" ]; then
-    info "Termux:Boot scripts:"
-    find "$boot_dir" -type f | while read -r f; do
-      echo "  📌 $(basename "$f") → $f" | tee -a "$SCAN_LOG"
-      if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|rm -rf /|mkfs|dd if=|cryptsetup|python.*-c.*import.*socket)' "$f" 2>/dev/null; then
-        alert "DANGEROUS command in boot script: $f"
-        quarantine_file "$f" "Malicious boot script"
-      fi
-    done
-  else
-    ok "No Termux:Boot scripts"
-  fi
-
-  # Shell profile modifications
-  for rcfile in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile"; do
-    if [ -f "$rcfile" ]; then
-      if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|reverse.shell|python.*-c.*import.*socket|base64.*decode)' "$rcfile" 2>/dev/null; then
-        alert "SUSPICIOUS command found in $rcfile"
-        quarantine_file "$rcfile" "Shell profile injection"
-      fi
+  local bd="$HOME/.termux/boot"
+  [ -d "$bd" ] && find "$bd" -type f 2>/dev/null | while read -r f; do
+    if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|rm -rf /)' "$f" 2>/dev/null; then
+      alert "Malicious boot script: $f"
+      quarantine_file "$f" "Malicious boot script"
     fi
   done
-  ok "Shell profiles scanned"
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$rc" ] && grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|base64.*decode.*bash|eval.*base64)' "$rc" 2>/dev/null && \
+      { alert "Injected shell profile: $rc"; quarantine_file "$rc" "Profile injection"; }
+  done
+  ok "Persistence scan done"
 }
 
-# ─── SCAN 5: File Integrity Check ───
-scan_file_integrity() {
+scan_integrity() {
   header "FILE INTEGRITY"
-  local hash_file="$BASELINE_DIR/hashes.sha256"
-
-  local current_hashes="/tmp/shield_current_hashes.txt"
-  local critical_paths=(
-    "/data/data/com.termux/files/usr/bin"
-    "/data/data/com.termux/files/usr/lib"
-  )
-
-  info "Hashing critical binaries..."
-  for p in "${critical_paths[@]}"; do
-    if [ -d "$p" ]; then
-      find "$p" -type f -executable 2>/dev/null | head -500 | while read -r f; do
-        sha256sum "$f" 2>/dev/null
-      done
-    fi
-  done | sort > "$current_hashes"
-
-  if [ -f "$hash_file" ]; then
-    local changed
-    changed=$(comm -23 <(sort "$hash_file") <(sort "$current_hashes"))
-    if [ -n "$changed" ]; then
-      alert "MODIFIED files since baseline (possible tampering):"
-      echo "$changed" | while read -r line; do
-        echo "  ✏️  $line" | tee -a "$SCAN_LOG"
-      done
-    else
-      ok "No file modifications in critical paths"
-    fi
-    cp "$current_hashes" "$hash_file"
+  local hf="$BASELINE_DIR/hashes.sha256"
+  local ch="/tmp/shield_cur_hash"
+  for p in /data/data/com.termux/files/usr/bin /data/data/com.termux/files/usr/lib; do
+    [ -d "$p" ] && find "$p" -type f -executable 2>/dev/null | head -500 | while read -r f; do sha256sum "$f" 2>/dev/null; done
+  done | sort > "$ch"
+  if [ -f "$hf" ]; then
+    local changed=$(comm -23 <(sort "$hf") <(sort "$ch"))
+    [ -n "$changed" ] && { alert "MODIFIED files:"; echo "$changed" | while read -r l; do echo "  ✏️  $l"; done; } || ok "No file tampering"
+    cp "$ch" "$hf"
   else
-    info "Creating initial file integrity baseline..."
-    cp "$current_hashes" "$hash_file"
-    info "Baseline: $(wc -l < "$hash_file") file hashes"
+    info "Creating integrity baseline ($(wc -l < "$ch") files)"
+    cp "$ch" "$hf"
   fi
-
-  # Check for suspicious hidden executables
   find /data/data/com.termux/files/usr -name ".*" -type f -executable 2>/dev/null | while read -r f; do
-    alert "Hidden executable found: $f"
-    quarantine_file "$f" "Hidden executable"
+    alert "Hidden executable: $f"; quarantine_file "$f" "Hidden executable"
   done
 }
 
-# ─── SCAN 6: Permission Audit ───
 scan_permissions() {
   header "PERMISSION AUDIT"
-
-  local ww_files
-  ww_files=$(find /data/data/com.termux/files/usr/bin -type f -perm -002 2>/dev/null | head -20)
-  if [ -n "$ww_files" ]; then
-    alert "World-writable executables found:"
-    echo "$ww_files" | while read -r line; do
-      echo "  🔓 $line" | tee -a "$SCAN_LOG"
-      chmod o-w "$line" 2>/dev/null && ok "  → Fixed permissions on $line"
-    done
+  local ww=$(find /data/data/com.termux/files/usr/bin -type f -perm -002 2>/dev/null | head -20)
+  if [ -n "$ww" ]; then
+    echo "$ww" | while read -r f; do chmod o-w "$f" 2>/dev/null && ok "Fixed: $f"; done
   else
-    ok "No world-writable executables in bin"
+    ok "No world-writable executables"
   fi
-
-  local suid_files
-  suid_files=$(find /data/data/com.termux/files/usr -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | head -20)
-  if [ -n "$suid_files" ]; then
-    alert "SUID/SGID binaries found (unusual for Termux):"
-    echo "$suid_files" | while read -r line; do
-      echo "  ⚠️  $line" | tee -a "$SCAN_LOG"
-      chmod u-s,g-s "$line" 2>/dev/null && ok "  → Removed SUID/SGID from $line"
-    done
+  local suid=$(find /data/data/com.termux/files/usr -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | head -20)
+  if [ -n "$suid" ]; then
+    echo "$suid" | while read -r f; do chmod u-s,g-s "$f" 2>/dev/null && ok "Removed SUID: $f"; done
   else
-    ok "No unexpected SUID/SGID binaries"
+    ok "No unexpected SUID/SGID"
   fi
 }
 
-# ─── SCAN 7: Python/Node Package Audit ───
-scan_script_packages() {
-  header "SCRIPT PACKAGE AUDIT (pip/npm)"
-
+scan_scripts() {
+  header "SCRIPT PACKAGE AUDIT"
   if command -v pip &>/dev/null; then
-    pip list --format=freeze 2>/dev/null | grep -iE '(backdoor|exploit|hack|keylogger|steal|trojan|evil|malicious|discord.py-self|request-mirror|beautifulsoup-usage)' | while read -r line; do
-      alert "SUSPICIOUS pip package: $line"
-      local pkgname
-      pkgname=$(echo "$line" | cut -d= -f1)
-      if [ "$AUTO_KILL" = true ]; then
-        pip uninstall -y "$pkgname" 2>/dev/null && ok "Removed pip package: $pkgname"
+    pip list --format=freeze 2>/dev/null | grep -iE '(backdoor|exploit|hack|keylogger|steal|trojan|evil|malicious)' | while read -r line; do
+      alert "Suspicious pip: $line"
+      local pn=$(echo "$line" | cut -d= -f1)
+      [ "$AUTO_KILL" = true ] && pip uninstall -y "$pn" 2>/dev/null && ok "Removed: $pn"
+    done
+    info "pip packages: $(pip list 2>/dev/null | tail -n +3 | wc -l)"
+  fi
+}
+
+scan_files() {
+  header "SUSPICIOUS FILE SCAN"
+  for sd in "$HOME" /data/data/com.termux/files/usr/bin /data/data/com.termux/files/usr/etc; do
+    [ -d "$sd" ] && find "$sd" \( -name "*.sh" -o -name "*.py" -o -name "*.js" -o -name "*.pl" \) 2>/dev/null | head -100 | while read -r f; do
+      if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|ncat -e|reverse.shell|python.*-c.*import.*socket.*subprocess|base64.*decode.*bash|eval.*base64)' "$f" 2>/dev/null; then
+        alert "Malicious pattern in: $f"
+        quarantine_file "$f" "Malicious code pattern"
       fi
     done
-    local pip_count
-    pip_count=$(pip list 2>/dev/null | tail -n +3 | wc -l)
-    info "Total pip packages: $pip_count"
-  fi
-
-  if command -v npm &>/dev/null; then
-    npm list -g --depth=0 2>/dev/null | tail -n +2 | head -30 | while read -r line; do
-      echo "  📦 $line" | tee -a "$SCAN_LOG"
-    done
-  fi
-}
-
-# ─── SCAN 8: Suspicious File Scanner ───
-scan_suspicious_files() {
-  header "SUSPICIOUS FILE SCAN"
-
-  # Scan for scripts with dangerous patterns in common locations
-  local scan_dirs=("$HOME" "/data/data/com.termux/files/usr/bin" "/data/data/com.termux/files/usr/etc")
-
-  for sdir in "${scan_dirs[@]}"; do
-    if [ -d "$sdir" ]; then
-      # Find recently modified scripts (last 24h)
-      find "$sdir" -name "*.sh" -o -name "*.py" -o -name "*.js" -o -name "*.pl" 2>/dev/null | head -100 | while read -r f; do
-        if grep -qiE '(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|ncat -e|reverse.shell|python.*-c.*import.*socket.*subprocess|base64.*decode.*bash|eval.*base64)' "$f" 2>/dev/null; then
-          alert "MALICIOUS PATTERN in script: $f"
-          quarantine_file "$f" "Malicious code pattern detected"
-        fi
-      done
-    fi
   done
-
-  ok "Suspicious file scan complete"
+  ok "File scan done"
 }
 
-# ─── GENERATE REPORT ───
 generate_report() {
   header "SCAN SUMMARY"
-
-  local alert_count warn_count ok_count kill_count
-  alert_count=$(grep -c '\[ALERT\]' "$SCAN_LOG" 2>/dev/null || echo 0)
-  warn_count=$(grep -c '\[WARN\]' "$SCAN_LOG" 2>/dev/null || echo 0)
-  ok_count=$(grep -c '\[OK\]' "$SCAN_LOG" 2>/dev/null || echo 0)
-  kill_count=$(grep -c 'KILLED\|QUARANTINED' "$KILL_LOG" 2>/dev/null || echo 0)
-
+  local ac=$(grep -c '\[ALERT\]' "$SCAN_LOG" 2>/dev/null || echo 0)
+  local wc=$(grep -c '\[WARN\]' "$SCAN_LOG" 2>/dev/null || echo 0)
+  local oc=$(grep -c '\[OK\]' "$SCAN_LOG" 2>/dev/null || echo 0)
+  local kc=$(grep -c 'KILLED\|QUARANTINED' "$KILL_LOG" 2>/dev/null || echo 0)
   echo -e "${BOLD}Results:${NC}"
-  echo -e "  ${RED}Alerts:     $alert_count${NC}"
-  echo -e "  ${YELLOW}Warnings:   $warn_count${NC}"
-  echo -e "  ${GREEN}Passed:     $ok_count${NC}"
-  echo -e "  ${RED}Kill/Quar:  $kill_count${NC}"
-  echo -e "  Auto-kill:  $($AUTO_KILL && echo -e "${GREEN}ON${NC}" || echo -e "${YELLOW}OFF${NC}")"
-  echo -e "\n  Full log:  $SCAN_LOG"
-  echo -e "  Alert log: $ALERT_LOG"
-  echo -e "  Kill log:  $KILL_LOG"
-
-  if [ "$alert_count" -gt 0 ]; then
-    echo -e "\n${RED}${BOLD}⚠️  SECURITY ALERTS — REVIEW LOGS IMMEDIATELY${NC}"
-    return 1
-  else
-    echo -e "\n${GREEN}${BOLD}✓ SYSTEM CLEAN${NC}"
-    return 0
-  fi
+  echo -e "  ${RED}Alerts:   $ac${NC}"
+  echo -e "  ${YELLOW}Warnings: $wc${NC}"
+  echo -e "  ${GREEN}Passed:   $oc${NC}"
+  echo -e "  ${RED}Killed:   $kc${NC}"
+  echo -e "  Auto-kill: $([ "$AUTO_KILL" = true ] && echo -e "${GREEN}ON${NC}" || echo -e "${YELLOW}OFF${NC}")"
+  echo -e "\n  Log: $SCAN_LOG"
+  [ "$ac" -gt 0 ] && echo -e "\n${RED}${BOLD}⚠️  ALERTS FOUND — REVIEW LOGS${NC}" || echo -e "\n${GREEN}${BOLD}✓ SYSTEM CLEAN${NC}"
 }
 
-# ─── MAIN EXECUTION ───
+# ═══════════════════════════════════════════
+# MONITOR (real-time daemon)
+# ═══════════════════════════════════════════
+start_monitor() {
+  nohup bash -c '
+    SHIELD_DIR="$HOME/.rocky-shield"
+    LOG="$SHIELD_DIR/logs/realtime.log"
+    KILL_LOG="$SHIELD_DIR/logs/kills.log"
+    PID_FILE="$SHIELD_DIR/monitor.pid"
+    AK_FILE="$SHIELD_DIR/autokill.enabled"
+    AUTH_FILE="$SHIELD_DIR/authorized.list"
+    echo $$ > "$PID_FILE"
+    AK=false; [ -f "$AK_FILE" ] && AK=true
+    dpkg -l 2>/dev/null | grep "^ii" | awk "{print \$2}" | sort > /tmp/sh_rt_pkgs
+    ss -tlnp 2>/dev/null | awk "{print \$4}" | sort > /tmp/sh_rt_listen 2>/dev/null || touch /tmp/sh_rt_listen
+    log() { echo "[$(date +%H:%M:%S)] $1" >> "$LOG"; }
+    is_auth() { grep -qi "^$1$" "$AUTH_FILE" 2>/dev/null; }
+    kill_it() {
+      local pid="$1" name="$2" reason="$3"
+      [ -z "$pid" ] || [ "$pid" = "$$" ] || [ "$pid" = "1" ] && return
+      is_auth "$name" && { log "SKIPPED auth: $name (PID $pid)"; return; }
+      if [ "$AK" = true ]; then
+        kill -TERM "$pid" 2>/dev/null; sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null && log "FORCE KILLED $pid ($name) — $reason"
+        kill -0 "$pid" 2>/dev/null || log "KILLED $pid ($name) — $reason"
+        echo "[$(date +%H:%M:%S)] KILLED $pid ($name) — $reason" >> "$KILL_LOG"
+        command -v termux-notification &>/dev/null && termux-notification --title "🛡️ Killed" --content "$name (PID $pid)" --priority high --id shield-kill
+      else
+        log "WOULD KILL $pid ($name) — $reason"
+      fi
+    }
+    log "Monitor started (PID: $$, auto-kill: $AK)"
+    while true; do
+      sleep 30
+      AK=false; [ -f "$AK_FILE" ] && AK=true
+      # New packages
+      dpkg -l 2>/dev/null | grep "^ii" | awk "{print \$2}" | sort > /tmp/sh_new_pkgs
+      comm -23 /tmp/sh_new_pkgs /tmp/sh_rt_pkgs | while read -r p; do
+        log "NEW PKG: $p"
+        echo "$p" | grep -qiE "(hack|exploit|crack|keylogger|backdoor|rootkit|trojan|payload)" && {
+          log "DANGEROUS PKG: $p"
+          [ "$AK" = true ] && dpkg --purge "$p" 2>/dev/null && log "REMOVED: $p"
+          command -v termux-notification &>/dev/null && termux-notification --title "🛡️ Dangerous Pkg" --content "$p" --priority high --id shield-pkg
+        }
+      done
+      mv /tmp/sh_new_pkgs /tmp/sh_rt_pkgs
+      # Malicious processes
+      SUSP="nc$|ncat$|netcat$|nmap$|hydra$|aircrack|ettercap$|john$|hashcat$|sqlmap$|msfconsole$|msfvenom$|xmrig|minerd$|stratum$|slowloris$|hping3$|arpspoof$|dsniff$|reaver$|wifite$"
+      ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE "$SUSP" | while read -r pid comm args; do kill_it "$pid" "$comm" "Malicious tool"; done
+      ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE "(/dev/tcp|/dev/udp|bash -i|sh -i|python.*-c.*socket.*subprocess|nc -e|ncat -e)" | while read -r pid comm args; do kill_it "$pid" "$comm" "Reverse shell"; done
+      ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE "(xmrig|minerd|stratum|cpuminer|ccminer|ethminer|nicehash)" | while read -r pid comm args; do kill_it "$pid" "$comm" "Crypto miner"; done
+      # New listeners
+      ss -tlnp 2>/dev/null | awk "{print \$4}" | sort > /tmp/sh_new_listen 2>/dev/null || touch /tmp/sh_new_listen
+      comm -23 /tmp/sh_new_listen /tmp/sh_rt_listen | while read -r port; do
+        [ -z "$port" ] && continue
+        echo "$port" | grep -qvE "127\.0\.0\.1|::1" && {
+          log "NEW LISTENER: $port"
+          pid=$(ss -tlnp 2>/dev/null | grep "$port" | grep -oP "pid=\K[0-9]+" | head -1)
+          [ -n "$pid" ] && kill_it "$pid" "listener-$port" "External listener"
+        }
+      done
+      mv /tmp/sh_new_listen /tmp/sh_rt_listen
+      # C2 outbound
+      ss -tnp 2>/dev/null | grep ESTAB | grep -E ":(4444|5555|6666|7777|8888|9999|1337|31337|12345|54321) " | while read -r line; do
+        pid=$(echo "$line" | grep -oP "pid=\K[0-9]+" | head -1)
+        [ -n "$pid" ] && kill_it "$pid" "c2" "C2 connection"
+      done
+      # Boot/profile tampering
+      for f in "$HOME/.termux/boot/"*; do
+        [ -f "$f" ] && [ "$f" -nt "$PID_FILE" ] 2>/dev/null && {
+          grep -qiE "(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e)" "$f" 2>/dev/null && {
+            qf="$SHIELD_DIR/quarantine/$(basename "$f").$(date +%s)"
+            cp "$f" "$qf" 2>/dev/null; chmod 000 "$qf"; rm -f "$f"
+            log "QUARANTINED boot script: $f"
+          }
+        }
+      done
+      for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [ -f "$rc" ] && [ "$rc" -nt "$PID_FILE" ] 2>/dev/null && {
+          grep -qiE "(curl.*\|.*bash|wget.*\|.*bash|/dev/tcp|nc -e|reverse)" "$rc" 2>/dev/null && {
+            qf="$SHIELD_DIR/quarantine/$(basename "$rc").$(date +%s)"
+            cp "$rc" "$qf" 2>/dev/null; chmod 000 "$qf"; rm -f "$rc"
+            log "QUARANTINED profile: $rc"
+          }
+        }
+      done
+    done
+  ' > /dev/null 2>&1 &
+  echo $! > "$MON_PID_FILE"
+  echo -e "${GREEN}✓ Monitor started (PID: $(cat "$MON_PID_FILE"))${NC}"
+}
+
+stop_monitor() {
+  local stopped=""
+  if [ -f "$MON_PID_FILE" ]; then
+    local mpid=$(cat "$MON_PID_FILE")
+    kill "$mpid" 2>/dev/null && stopped="monitor"
+    rm -f "$MON_PID_FILE"
+  fi
+  if [ -f "$WATCHDOG_PID_FILE" ]; then
+    local wpid=$(cat "$WATCHDOG_PID_FILE")
+    kill "$wpid" 2>/dev/null && stopped="$stopped watchdog"
+    rm -f "$WATCHDOG_PID_FILE"
+  fi
+  # Also kill any leftover monitor processes
+  pkill -f "shield.*monitor" 2>/dev/null
+  [ -n "$stopped" ] && echo -e "${GREEN}✓ Stopped: $stopped${NC}" || echo -e "${YELLOW}No monitor running${NC}"
+}
+
+# ═══════════════════════════════════════════
+# MAIN COMMAND DISPATCHER
+# ═══════════════════════════════════════════
+
 clear 2>/dev/null
 echo -e "${BOLD}"
 echo "  ██████╗  ██████╗  ██████╗██╗  ██╗██╗   ██╗"
@@ -445,38 +389,181 @@ echo "  ██████╔╝██║   ██║██║     ████�
 echo "  ██╔══██╗██║   ██║██║     ██╔═██╗   ╚██╔╝  "
 echo "  ██║  ██║╚██████╔╝╚██████╗██║  ██╗   ██║   "
 echo "  ╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝   "
-echo -e "  ${CYAN}SHIELD v2.0 — Termux Security Monitor${NC}"
-echo -e "  $(date) | Auto-kill: $($AUTO_KILL && echo ON || echo OFF)${NC}"
+echo -e "  ${CYAN}SHIELD v3.0 — Termux Security${NC}${NC}"
+echo -e "  $(date) | Auto-kill: $([ "$AUTO_KILL" = true ] && echo ON || echo OFF)${NC}"
 echo ""
 
 case "${1:-full}" in
-  full)
-    scan_packages
-    scan_network
-    scan_processes
-    scan_persistence
-    scan_file_integrity
-    scan_permissions
-    scan_script_packages
-    scan_suspicious_files
+  # ── Full scan ──
+  full|scan)
+    scan_packages; scan_network; scan_processes; scan_persistence
+    scan_integrity; scan_permissions; scan_scripts; scan_files
     generate_report
     ;;
-  pkg) scan_packages ;;
-  net) scan_network ;;
-  proc) scan_processes ;;
-  persist) scan_persistence ;;
-  integrity) scan_file_integrity ;;
-  perms) scan_permissions ;;
-  scripts) scan_script_packages ;;
-  files) scan_suspicious_files ;;
+
+  # ── Quick scan (processes + network only) ──
+  quick)
+    scan_processes; scan_network
+    generate_report
+    ;;
+
+  # ── Individual scans ──
+  pkg|packages)    scan_packages ;;
+  net|network)     scan_network ;;
+  proc|processes)  scan_processes ;;
+  persist)         scan_persistence ;;
+  integrity)       scan_integrity ;;
+  perms)           scan_permissions ;;
+  scripts)         scan_scripts ;;
+  files)           scan_files ;;
+
+  # ── Monitor control ──
+  start)
+    start_monitor
+    ;;
+  stop)
+    stop_monitor
+    ;;
+  restart)
+    stop_monitor
+    sleep 2
+    start_monitor
+    ;;
+  status)
+    echo -e "${BOLD}Shield Status:${NC}"
+    if [ -f "$MON_PID_FILE" ] && kill -0 "$(cat "$MON_PID_FILE")" 2>/dev/null; then
+      echo -e "  Monitor:  ${GREEN}RUNNING${NC} (PID $(cat "$MON_PID_FILE"))"
+    else
+      echo -e "  Monitor:  ${RED}STOPPED${NC}"
+    fi
+    if [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null; then
+      echo -e "  Watchdog: ${GREEN}RUNNING${NC} (PID $(cat "$WATCHDOG_PID_FILE"))"
+    else
+      echo -e "  Watchdog: ${RED}STOPPED${NC}"
+    fi
+    echo -e "  Auto-kill: $([ "$AUTO_KILL" = true ] && echo -e "${GREEN}ON${NC}" || echo -e "${YELLOW}OFF${NC}")"
+    echo -e "  Authorized: $(wc -l < "$AUTH_FILE" 2>/dev/null || echo 0) tools"
+    echo -e "  Alerts: $(grep -c '\[ALERT\]' "$ALERT_LOG" 2>/dev/null || echo 0)"
+    echo -e "  Kills:  $(grep -c 'KILLED\|QUARANTINED' "$KILL_LOG" 2>/dev/null || echo 0)"
+    ;;
+
+  # ── Auto-kill toggle ──
   autokill)
     case "${2:-status}" in
-      on)  touch "$AUTO_KILL_FILE"; echo -e "${RED}AUTO-KILL ENABLED${NC}" ;;
-      off) rm -f "$AUTO_KILL_FILE"; echo -e "${YELLOW}AUTO-KILL DISABLED${NC}" ;;
-      status) [ "$AUTO_KILL" = true ] && echo "ON" || echo "OFF" ;;
+      on)   touch "$AUTO_KILL_FILE"; echo -e "${RED}AUTO-KILL ENABLED${NC}" ;;
+      off)  rm -f "$AUTO_KILL_FILE"; echo -e "${YELLOW}AUTO-KILL DISABLED${NC}" ;;
+      *)    [ "$AUTO_KILL" = true ] && echo "ON" || echo "OFF" ;;
     esac
     ;;
+
+  # ── Authorize a tool/package (whitelist) ──
+  authorize)
+    if [ -z "$2" ]; then
+      echo -e "${BOLD}Authorized tools:${NC}"
+      cat "$AUTH_FILE" 2>/dev/null | while read -r t; do echo "  ✓ $t"; done
+      echo ""
+      echo "Usage: shield authorize <toolname>"
+      echo "Example: shield authorize nmap"
+    else
+      local tool=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+      if is_authorized "$tool"; then
+        echo -e "${YELLOW}$tool is already authorized${NC}"
+      else
+        echo "$tool" >> "$AUTH_FILE"
+        echo -e "${GREEN}✓ Authorized: $tool${NC}"
+        echo -e "  Shield will NOT kill or flag this tool."
+      fi
+    fi
+    ;;
+
+  # ── Revoke authorization ──
+  revoke)
+    if [ -z "$2" ]; then
+      echo -e "${BOLD}Authorized tools:${NC}"
+      cat "$AUTH_FILE" 2>/dev/null | while read -r t; do echo "  ✓ $t"; done
+      echo ""
+      echo "Usage: shield revoke <toolname>"
+    else
+      local tool=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+      if is_authorized "$tool"; then
+        sed -i "/^${tool}$/d" "$AUTH_FILE"
+        echo -e "${RED}✓ Revoked: $tool${NC}"
+        echo -e "  Shield will now monitor this tool."
+      else
+        echo -e "${YELLOW}$tool is not in the authorized list${NC}"
+      fi
+    fi
+    ;;
+
+  # ── View logs ──
+  logs)
+    echo -e "${BOLD}── Recent Alerts ──${NC}"
+    tail -30 "$ALERT_LOG" 2>/dev/null || echo "No alerts yet"
+    echo ""
+    echo -e "${BOLD}── Recent Kills/Quarantines ──${NC}"
+    tail -20 "$KILL_LOG" 2>/dev/null || echo "No kills yet"
+    ;;
+
+  # ── Quarantine management ──
+  quarantine)
+    echo -e "${BOLD}Quarantined files:${NC}"
+    ls -la "$QUARANTINE_DIR" 2>/dev/null || echo "  (empty)"
+    echo ""
+    echo "Restore: shield restore <filename>"
+    ;;
+  restore)
+    if [ -z "$2" ]; then
+      echo "Usage: shield restore <filename>"
+      ls "$QUARANTINE_DIR" 2>/dev/null
+    else
+      local qf=$(find "$QUARANTINE_DIR" -name "$2*" -type f 2>/dev/null | head -1)
+      if [ -n "$qf" ]; then
+        local orig="$HOME/$(basename "$2")"
+        cp "$qf" "$orig" 2>/dev/null
+        chmod 644 "$orig" 2>/dev/null
+        echo -e "${GREEN}✓ Restored: $orig${NC}"
+      else
+        echo -e "${RED}Not found in quarantine${NC}"
+      fi
+    fi
+    ;;
+
+  # ── Help ──
+  help|--help|-h)
+    echo -e "${BOLD}SHIELD v3.0 — Commands${NC}"
+    echo ""
+    echo -e "  ${CYAN}Scans:${NC}"
+    echo "    shield              Full 8-layer scan"
+    echo "    shield quick        Quick scan (processes + network)"
+    echo "    shield pkg          Package audit"
+    echo "    shield net          Network monitor"
+    echo "    shield proc         Process audit"
+    echo "    shield persist      Persistence check"
+    echo "    shield integrity    File integrity"
+    echo "    shield perms        Permission audit"
+    echo "    shield scripts      Python/Node audit"
+    echo "    shield files        Suspicious file scan"
+    echo ""
+    echo -e "  ${CYAN}Monitor:${NC}"
+    echo "    shield start        Start real-time monitor"
+    echo "    shield stop         Stop monitor + watchdog"
+    echo "    shield restart      Restart monitor"
+    echo "    shield status       Show status"
+    echo ""
+    echo -e "  ${CYAN}Authorization:${NC}"
+    echo "    shield authorize <tool>   Whitelist a tool (won't be killed)"
+    echo "    shield authorize          List authorized tools"
+    echo "    shield revoke <tool>      Remove from whitelist"
+    echo ""
+    echo -e "  ${CYAN}Other:${NC}"
+    echo "    shield autokill on|off    Toggle auto-kill"
+    echo "    shield logs               View alerts + kills"
+    echo "    shield quarantine         List quarantined files"
+    echo "    shield restore <file>     Restore quarantined file"
+    ;;
+
   *)
-    echo "Usage: rockyshield [full|pkg|net|proc|persist|integrity|perms|scripts|files|autokill]"
+    echo "Unknown command: $1"
+    echo "Run 'shield help' for commands"
     ;;
 esac

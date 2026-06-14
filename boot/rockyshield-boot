@@ -1,20 +1,18 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux:Boot startup script for Rocky Shield v2.0
-# This file lives at ~/.termux/boot/rockyshield
-# Termux:Boot runs everything in this directory on startup
+# Termux:Boot — Rocky Shield v3.0 auto-start
+# Lives at: ~/.termux/boot/rockyshield
 
 SHIELD_DIR="$HOME/.rocky-shield"
 LOG_DIR="$SHIELD_DIR/logs"
-
 mkdir -p "$LOG_DIR"
 
 # Wait for Termux to fully initialize
 sleep 20
 
-# Check dependencies exist
+# Check dependencies
 for cmd in dpkg ps ss; do
   if ! command -v "$cmd" &>/dev/null; then
-    echo "[$(date)] ERROR: $cmd not found, cannot start shield" >> "$LOG_DIR/boot_error.log"
+    echo "[$(date)] ERROR: $cmd not found" >> "$LOG_DIR/boot_error.log"
     exit 1
   fi
 done
@@ -22,16 +20,18 @@ done
 # Run full boot scan
 "$SHIELD_DIR/rockyshield.sh" full >> "$LOG_DIR/boot_scan.log" 2>&1
 
-# Start real-time monitor with auto-restart wrapper
-# This ensures monitor stays alive even if Termux tries to kill it
+# Start monitor with watchdog (auto-restart if killed)
 nohup bash -c '
   SHIELD_DIR="$HOME/.rocky-shield"
   while true; do
-    if [ -f "$SHIELD_DIR/monitor.sh" ]; then
-      "$SHIELD_DIR/monitor.sh" &
-      MON_PID=$!
-      wait $MON_PID 2>/dev/null
-      echo "[$(date)] Monitor died (PID $MON_PID), restarting in 5s..." >> "$SHIELD_DIR/logs/watchdog.log"
+    if [ -f "$SHIELD_DIR/rockyshield.sh" ]; then
+      "$SHIELD_DIR/rockyshield.sh" start
+      sleep 2
+      MON_PID=$(cat "$SHIELD_DIR/monitor.pid" 2>/dev/null)
+      if [ -n "$MON_PID" ]; then
+        wait $MON_PID 2>/dev/null
+      fi
+      echo "[$(date)] Monitor died, restarting in 5s..." >> "$SHIELD_DIR/logs/watchdog.log"
     fi
     sleep 5
   done
@@ -46,14 +46,14 @@ if command -v termux-notification &>/dev/null; then
   if [ "$ALERTS" -gt 0 ] || [ "$KILLS" -gt 0 ]; then
     termux-notification \
       --title "🛡️ Shield Boot Scan" \
-      --content "$ALERTS alerts, $KILLS killed/quarantined. Monitor active." \
+      --content "$ALERTS alerts, $KILLS killed. Monitor active." \
       --priority high --id rockyshield
   else
     termux-notification \
       --title "🛡️ Shield Active" \
-      --content "System clean. Real-time monitor running." \
+      --content "System clean. Monitor + watchdog running." \
       --priority default --id rockyshield
   fi
 fi
 
-echo "[$(date)] Shield boot complete. Watchdog PID: $(cat $SHIELD_DIR/watchdog.pid)" >> "$LOG_DIR/boot.log"
+echo "[$(date)] Boot complete. Watchdog PID: $(cat $SHIELD_DIR/watchdog.pid)" >> "$LOG_DIR/boot.log"
